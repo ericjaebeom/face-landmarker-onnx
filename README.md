@@ -9,7 +9,7 @@ no face. Nothing is filtered by detection or presence confidence.
 Requires [UV](https://docs.astral.sh/uv/) and Python 3.12 (UV can install Python).
 
 ```bash
-uv run --extra cpu --group export python export_models.py --output-dir models
+uv run --extra cpu --extra export face-landmarker-export --output-dir models
 ```
 
 This downloads the official Face Landmarker v1 bundle and writes
@@ -21,7 +21,13 @@ can be rerun. Use `--iou-threshold 0.3` to change the default overlap threshold 
 
 ## Install and run
 
-Choose one runtime:
+Install from this checkout or from the public repository:
+
+```bash
+uv pip install "face-landmark-onnx[cuda,export] @ git+https://github.com/ericjaebeom/face-landmarker-onnx"
+```
+
+Choose one runtime when working in the checkout:
 
 ```bash
 uv sync --extra cpu
@@ -33,18 +39,19 @@ The CUDA extra installs CUDA 12 libraries and cuDNN; a compatible NVIDIA driver
 is required. Runtime inference uses neither TensorFlow nor MediaPipe.
 
 ```python
-from face_landmarker import FaceLandmarker
+from face_landmarker import FaceLandmarker, ensure_models
 
 # images: list of RGB uint8 NumPy arrays, each shaped (height, width, 3).
 # Resolutions may differ. A stacked (N, H, W, 3) array also works.
 with FaceLandmarker(
-    "models/blazeface.onnx",
-    "models/facemesh_v2.onnx",
-    device="cpu",  # or "cuda:0"
+    *ensure_models("models"),  # requires the export extra on a fresh cache
+    device="auto",  # or "cpu", "cuda", "cuda:0"
 ) as pipeline:
     result = pipeline(images)
     # result = pipeline(images, normalized=True)
     # result = pipeline(images, return_gpu=True)  # CUDA: CuPy arrays
+
+    print(pipeline.device)  # selected "cpu" or "cuda:N"
 
 landmarks = result["landmarks"]  # (N, 478, 3), in input order
 ```
@@ -72,3 +79,18 @@ original images and scratch buffers for reuse. Reuse a pipeline across batches;
 the first call is slower, and changing CUDA batch size can trigger model retuning.
 `num_threads=8` bounds CPU parallelism (default: up to eight threads). Use one
 pipeline per calling thread, and close it with the context manager or `close()`.
+
+`ensure_models(model_dir)` exports missing models in a subprocess, with CUDA
+disabled only in that subprocess. TensorFlow is never imported by the runtime.
+Cached models are checked for compatibility when the pipeline opens them. The
+export extra installs TensorFlow, tf2onnx, ONNX, and ONNXScript; it is unnecessary
+when supplying existing models directly.
+
+`device="auto"` checks CUDA availability and reports a CPU fallback when no usable
+GPU is found. Explicit CUDA requests fail when CUDA cannot initialize. Model and
+inference errors propagate to the caller. One pipeline handles one GPU.
+
+## Upstream notices
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for MediaPipe model and
+processing attribution and the included Apache-2.0 license text.

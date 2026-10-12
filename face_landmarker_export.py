@@ -1,4 +1,4 @@
-"""Export the two batched models; run with UV's export dependency group."""
+"""Export the two batched models; install the package's export extra."""
 # ONNXScript string dimensions are not Python forward references.
 # ruff: noqa: F821, UP037
 
@@ -179,7 +179,7 @@ def _join(base: onnx.ModelProto, post: onnx.ModelProto,
 
 def build_models(bundle: Path, work_dir: Path, iou_threshold: float = 0.5):
     # Export uses TensorFlow only on CPU; inference has no TensorFlow dependency.
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
     os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "2")
     os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import atexit
 import math
+import os
+import subprocess
+import sys
+import warnings
 import weakref
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +19,42 @@ import numpy as np
 from numba import get_num_threads, njit, prange, set_num_threads
 
 _RESULT_WIDTH = 16 + 1 + 478 * 3 + 2
+
+
+def ensure_models(model_dir: str | Path) -> tuple[Path, Path]:
+    """Export missing models in a child process; requires the export extra.
+
+    TensorFlow and its CPU-only export settings never enter the calling process.
+    Existing models are checked for compatibility when FaceLandmarker loads them.
+    """
+    model_dir = Path(model_dir).resolve()
+    paths = (model_dir / "blazeface.onnx", model_dir / "facemesh_v2.onnx")
+    if not all(path.is_file() for path in paths):
+        subprocess.run(
+            [sys.executable, "-m", "face_landmarker_export", "--output-dir", str(model_dir)],
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": "-1"}, check=True,
+        )
+    return paths
+
+
+def _auto_device() -> str:
+    import onnxruntime as ort
+
+    reason = "CUDAExecutionProvider is not installed"
+    if "CUDAExecutionProvider" in ort.get_available_providers():
+        try:
+            import cupy as cp
+
+            ort.preload_dlls(directory="")
+            if cp.cuda.runtime.getDeviceCount():
+                with cp.cuda.Device(0):
+                    cp.empty(1)  # Check that the driver can actually initialize.
+                return "cuda:0"
+            reason = "no visible CUDA devices"
+        except (ImportError, OSError, RuntimeError) as error:
+            reason = str(error)
+    warnings.warn(f"Using CPU: {reason}", RuntimeWarning, stacklevel=3)
+    return "cpu"
 
 
 @njit(cache=True, parallel=True)
@@ -201,8 +241,22 @@ class FaceLandmarker:
 
     def __init__(self, detector_path: str | Path, landmarks_path: str | Path,
                  device: str = "cpu", *, num_threads: int | None = None):
+        self._closed = False
+        self._sessions = []
+        self._buffers = {}
+        self._copy_pool = None
+        try:
+            self._initialize(detector_path, landmarks_path, device, num_threads)
+        except BaseException:
+            self.close()
+            raise
+
+    def _initialize(self, detector_path, landmarks_path, device, num_threads):
         import onnxruntime as ort
 
+        automatic = device == "auto"
+        if automatic:
+            device = _auto_device()
         if device == "cpu":
             self._cuda = False
             self._device_id = 0
@@ -210,11 +264,11 @@ class FaceLandmarker:
             self._cuda = True
             self._device_id = int(device.partition(":")[2] or 0)
         else:
-            raise ValueError("device must be 'cpu', 'cuda', or 'cuda:N'")
+            raise ValueError("device must be 'auto', 'cpu', 'cuda', or 'cuda:N'")
+        self.device = f"cuda:{self._device_id}" if self._cuda else "cpu"
         if num_threads is not None and (not isinstance(num_threads, int) or num_threads < 1):
             raise ValueError("num_threads must be a positive integer")
         self._threads = min(num_threads or 8, get_num_threads())
-        self._buffers = {}
         self._copy_pool = ThreadPoolExecutor(max_workers=self._threads)
         self._host_pixels = np.empty(0, np.uint8)
         self._xp = np
@@ -252,9 +306,16 @@ class FaceLandmarker:
             # ORT 1.23 also defers freeing pinned scratch buffers indefinitely.
         else:
             providers = ["CPUExecutionProvider"]
-        self._sessions = [ort.InferenceSession(str(path), options, providers=providers)
-                          for path in (detector_path, landmarks_path)]
-        self._closed = False
+        for path in (detector_path, landmarks_path):
+            self._sessions.append(ort.InferenceSession(str(path), options, providers=providers))
+        if self._cuda and any("CUDAExecutionProvider" not in s.get_providers() for s in self._sessions):
+            if not automatic:
+                raise RuntimeError("ONNX Runtime could not initialize CUDAExecutionProvider")
+            warnings.warn("Using CPU: ONNX Runtime could not initialize CUDAExecutionProvider",
+                          RuntimeWarning, stacklevel=3)
+            self.close()
+            self.__init__(detector_path, landmarks_path, "cpu", num_threads=num_threads)
+            return
         # Register after importing CuPy, so sessions are released before its
         # CUDA runtime cleanup. The weak reference does not retain instances.
         self._exit_callback = partial(_close_at_exit, weakref.ref(self))
@@ -280,7 +341,7 @@ class FaceLandmarker:
                     or {out.name: out.shape[1:] for out in outputs} != expected
                     or any(out.type != "tensor(float)" or isinstance(out.shape[0], int)
                            for out in outputs)):
-                raise ValueError(f"Incompatible {kind} model; use the models from export_models.py")
+                raise ValueError(f"Incompatible {kind} model; run face-landmarker-export")
             by_name = {out.name: out for out in outputs}
             self._output_specs.append([by_name[name] for name in expected])
 
@@ -288,7 +349,7 @@ class FaceLandmarker:
         """Release sessions and scratch storage. Returned results remain valid."""
         if getattr(self, "_closed", True):
             return
-        if self._cuda:
+        if getattr(self, "_cuda", False) and hasattr(self, "_stream"):
             with self._device:
                 self._stream.synchronize()
                 self._sessions.clear()
@@ -300,8 +361,10 @@ class FaceLandmarker:
             self._buffers.clear()
             self._host_pixels = None
         self._closed = True
-        self._copy_pool.shutdown(wait=True)
-        atexit.unregister(self._exit_callback)
+        if self._copy_pool is not None:
+            self._copy_pool.shutdown(wait=True)
+        if hasattr(self, "_exit_callback"):
+            atexit.unregister(self._exit_callback)
 
     def __enter__(self):
         if self._closed:

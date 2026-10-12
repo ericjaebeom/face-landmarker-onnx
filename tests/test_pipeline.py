@@ -1,4 +1,4 @@
-"""Run with: uv run --extra cuda --group export --group dev pytest"""
+"""Run with: uv run --extra cuda --extra export --group dev pytest"""
 
 import hashlib
 import math
@@ -14,7 +14,7 @@ import onnxruntime as ort
 import pytest
 from PIL import Image
 
-from export_models import anchors, detector_postprocess, download_bundle
+from face_landmarker_export import anchors, detector_postprocess, download_bundle
 from face_landmarker import FaceLandmarker, _project_cpu, _roi_cpu, _warp_cpu
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,7 +179,7 @@ def images(portrait):
 @pytest.fixture(scope="session")
 def cpu():
     if not all(p.exists() for p in MODEL_PATHS):
-        pytest.skip("Run export_models.py first")
+        pytest.skip("Run face-landmarker-export first")
     with FaceLandmarker(*MODEL_PATHS, num_threads=2) as pipeline:
         yield pipeline
 
@@ -187,7 +187,7 @@ def cpu():
 @pytest.fixture(scope="session")
 def gpu():
     if not all(p.exists() for p in MODEL_PATHS):
-        pytest.skip("Run export_models.py first")
+        pytest.skip("Run face-landmarker-export first")
     cp = pytest.importorskip("cupy")
     if "CUDAExecutionProvider" not in ort.get_available_providers():
         pytest.skip("CUDAExecutionProvider unavailable")
