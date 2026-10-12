@@ -24,7 +24,7 @@ can be rerun. Use `--iou-threshold 0.3` to change the default overlap threshold 
 Install from this checkout or from the public repository:
 
 ```bash
-uv pip install "face-landmark-onnx[cuda,export] @ git+https://github.com/ericjaebeom/face-landmarker-onnx"
+uv pip install "face-landmark-onnx[cuda,export] @ git+https://github.com/ericjaebeom/face-landmarker-onnx@1b35341b4b59f36aa89a459441b143cc763908c1"
 ```
 
 Choose one runtime when working in the checkout:
